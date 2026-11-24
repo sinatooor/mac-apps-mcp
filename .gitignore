@@ -1,0 +1,5 @@
+# build output
+/mac-apps-mcp
+_CodeSignature/
+.DS_Store
+*.o

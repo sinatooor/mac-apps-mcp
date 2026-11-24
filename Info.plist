@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>local.mac-apps-mcp</string>
+  <key>CFBundleName</key><string>mac-apps-mcp</string>
+  <key>NSCalendarsFullAccessUsageDescription</key><string>Lets Claude read and add calendar events. It cannot delete events.</string>
+  <key>NSCalendarsUsageDescription</key><string>Lets Claude read and add calendar events.</string>
+  <key>NSRemindersFullAccessUsageDescription</key><string>Lets Claude read and add reminders. It cannot delete reminders.</string>
+  <key>NSRemindersUsageDescription</key><string>Lets Claude read and add reminders.</string>
+  <key>NSContactsUsageDescription</key><string>Lets Claude look up and add contacts. It cannot delete contacts.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Lets Claude read and draft mail in Mail and work with Notes.</string>
+</dict>
+</plist>
