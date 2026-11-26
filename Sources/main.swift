@@ -19,7 +19,7 @@ func enabledApps() -> Set<String> {
 }
 
 let apps = enabledApps()
-let tools: [Tool] = (calendarTools + reminderTools + contactTools + mailTools + notesTools + shortcutTools + notifyTools)
+let tools: [Tool] = (calendarTools + reminderTools + contactTools + mailTools + notesTools + notesSemanticTools + shortcutTools + notifyTools)
     .filter { apps.contains($0.app) }
 let toolsByName = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0) })
 
