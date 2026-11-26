@@ -194,26 +194,31 @@ struct NoteListing { let id: String, title: String, folder: String, modified: Do
 
 /// All notes that live in a folder (Recently Deleted excluded), via the bulk listing script.
 func listAllNotes() throws -> [NoteListing] {
+    // The script reports dates relative to its own start time, so convert them using the
+    // time just before it started (not after it finished, which can be seconds later).
+    let scriptStart = Date().timeIntervalSince1970
     let out = try appleScript(asNotesSearch + asHelpers, ["", "", ""], timeout: 240)
     let sections = out.components(separatedBy: "\u{1D}")
     var folderOf: [String: String] = [:]
     if sections.count > 1 {
         for m in records(sections[1]) where m.count >= 2 { folderOf[m[0]] = m[1] }
     }
-    let now = Date().timeIntervalSince1970
     var seen = Set<String>()
     var list: [NoteListing] = []
     for f in records(sections[0]) where f.count >= 5 {
         guard !seen.contains(f[0]), let folder = folderOf[f[0]],
               folder != "Recently Deleted", folder != "Nyligen raderade" else { continue }
         seen.insert(f[0])
-        let modified = (now + (Double(f[3]) ?? 0)).rounded()
+        let modified = (scriptStart + (Double(f[3]) ?? 0)).rounded()
         list.append(NoteListing(id: f[0], title: f[1], folder: folder, modified: modified, locked: f[4] == "true"))
     }
     return list
 }
 
 /// Brings the index up to date within `budget` seconds. Returns (indexed, total, remaining).
+/// Titles of notes that were pending (new or changed) on the last update, for diagnostics.
+var lastPending: [String] = []
+
 func updateIndex(_ idx: inout NotesIndex, budget: TimeInterval) throws -> (Int, Int, Int) {
     let started = Date()
     let listing = try listAllNotes()
@@ -223,12 +228,18 @@ func updateIndex(_ idx: inout NotesIndex, budget: TimeInterval) throws -> (Int, 
 
     var todo: [NoteListing] = []
     for n in listing where !n.locked {
-        if let have = idx.notes[n.id], abs(have.modified - n.modified) < 3 {
+        if let have = idx.notes[n.id], abs(have.modified - n.modified) < 5 {
             idx.notes[n.id]?.folder = n.folder
             idx.notes[n.id]?.title = n.title
         } else {
             todo.append(n)
         }
+    }
+    lastPending = todo.prefix(8).map { n in
+        if let have = idx.notes[n.id] {
+            return "\(n.title) (changed: modified \(Int(n.modified - have.modified)) s later)"
+        }
+        return "\(n.title) (new)"
     }
     // Folders with many changed notes: read all their text in bulk. Others: note by note.
     var byFolder: [String: [NoteListing]] = [:]
@@ -272,18 +283,39 @@ var indexRunning = false
 var indexProgress = (indexed: 0, total: 0)
 
 /// Starts one background indexing run (if none is running) that continues until finished.
+/// Claude may run several copies of this server. A file lock makes sure only one of them
+/// builds the index at a time; the others just search what's saved.
+let indexLockPath = indexURL.deletingLastPathComponent().appendingPathComponent("notes-index.lock").path
+
+func tryProcessLock() -> Int32? {
+    let fd = open(indexLockPath, O_CREAT | O_RDWR, 0o644)
+    guard fd >= 0 else { return nil }
+    if flock(fd, LOCK_EX | LOCK_NB) != 0 { close(fd); return nil }
+    return fd
+}
+
 func startBackgroundIndexing() {
     indexLock.lock()
     if indexRunning { indexLock.unlock(); return }
     indexRunning = true
     indexLock.unlock()
     Thread.detachNewThread {
-        var idx = loadIndex()
-        if let r = try? updateIndex(&idx, budget: 7200) {
-            indexLock.lock(); indexProgress = (r.0, r.1); indexLock.unlock()
+        if let fd = tryProcessLock() {
+            var idx = loadIndex()
+            if let r = try? updateIndex(&idx, budget: 7200) {
+                indexLock.lock(); indexProgress = (r.0, r.1); indexLock.unlock()
+            }
+            flock(fd, LOCK_UN); close(fd)
         }
         indexLock.lock(); indexRunning = false; indexLock.unlock()
     }
+}
+
+/// True while another copy of the server holds the indexing lock.
+func otherProcessIndexing() -> Bool {
+    guard let fd = tryProcessLock() else { return true }
+    flock(fd, LOCK_UN); close(fd)
+    return false
 }
 
 func backgroundRunning() -> Bool {
@@ -305,7 +337,7 @@ let notesSemanticTools: [Tool] = [
         let query = try a.req("query")
         var idx = loadIndex()
         var total = 0, remaining = 0
-        if backgroundRunning() {
+        if backgroundRunning() || otherProcessIndexing() {
             // A background run is still building the index: search what's saved so far.
             total = idx.total ?? 0
             remaining = max(0, total - idx.notes.count)
@@ -355,6 +387,7 @@ let notesSemanticTools: [Tool] = [
         if total > 0 { out["total_notes"] = total }
         if remaining != 0 {
             out["note"] = "Index still building in the background (\(idx.notes.count) notes indexed so far). Results cover only those; search again in a few minutes for complete results."
+            if !lastPending.isEmpty { out["pending_examples"] = lastPending }
         }
         return out
     },
