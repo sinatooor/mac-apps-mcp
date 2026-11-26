@@ -30,8 +30,9 @@ struct IndexedNote: Codable {
 }
 
 struct NotesIndex: Codable {
-    var version = 1
+    var version = 2
     var notes: [String: IndexedNote] = [:]
+    var total: Int? = nil       // number of indexable notes at the last listing
 }
 
 let indexURL: URL = {
@@ -43,7 +44,8 @@ let indexURL: URL = {
 
 func loadIndex() -> NotesIndex {
     guard let d = try? Data(contentsOf: indexURL),
-          let idx = try? PropertyListDecoder().decode(NotesIndex.self, from: d) else { return NotesIndex() }
+          let idx = try? PropertyListDecoder().decode(NotesIndex.self, from: d),
+          idx.version == NotesIndex().version else { return NotesIndex() }
     return idx
 }
 
@@ -56,8 +58,17 @@ func saveIndex(_ idx: NotesIndex) {
 // MARK: - Embeddings
 
 var embeddingModels: [String: NLEmbedding] = [:]
+/// Embeddings are used from the background indexer and from searches; serialize access.
+let embedLock = NSLock()
 
-/// Sentence embedding for a language, falling back to English.
+/// Embeds `text` with the model for `lang` (English fallback). Returns (language used, vector).
+func embed(_ text: String, lang: String) -> (String, [Float])? {
+    embedLock.lock(); defer { embedLock.unlock() }
+    guard let m = embeddingModel(lang), let v = m.1.vector(for: text) else { return nil }
+    return (m.0, normalizedVector(v))
+}
+
+/// Sentence embedding for a language, falling back to English. Call only while holding embedLock.
 func embeddingModel(_ lang: String) -> (String, NLEmbedding)? {
     for code in [lang, "en"] {
         if let m = embeddingModels[code] { return (code, m) }
@@ -130,9 +141,10 @@ func embedNote(title: String, text: String) -> [NoteChunk] {
     for (start, length) in chunkText(text) {
         var piece = substring(text, start, length)
         if start == 0 && !piece.hasPrefix(title) { piece = title + ". " + piece }
-        let lang = detectLanguage(piece)
-        guard let m = embeddingModel(lang), let v = m.1.vector(for: piece) else { continue }
-        out.append(NoteChunk(lang: m.0, start: start, length: length, vec: toData(normalizedVector(v))))
+        // One shared (English) vector space keeps scores comparable; other languages
+        // are covered by keyword matching.
+        guard piece.count >= 3, let e = embed(piece, lang: "en") else { continue }
+        out.append(NoteChunk(lang: e.0, start: start, length: length, vec: toData(e.1)))
     }
     return out
 }
@@ -150,6 +162,27 @@ on run argv
             try
                 set t to plaintext of note id nid
                 set out to out & nid & US & t & RS
+            end try
+        end repeat
+    end tell
+    return out
+end run
+"""
+
+/// Text of every note in the folders with this name (all accounts), in two bulk requests per folder.
+let asFolderTexts = """
+on run argv
+    set US to character id 31
+    set RS to character id 30
+    set out to ""
+    tell application "Notes"
+        repeat with f in (folders whose name is (item 1 of argv))
+            try
+                set ids to id of notes of f
+                set txts to plaintext of notes of f
+                repeat with i from 1 to count of ids
+                    set out to out & (item i of ids) & US & (item i of txts) & RS
+                end repeat
             end try
         end repeat
     end tell
@@ -184,6 +217,7 @@ func listAllNotes() throws -> [NoteListing] {
 func updateIndex(_ idx: inout NotesIndex, budget: TimeInterval) throws -> (Int, Int, Int) {
     let started = Date()
     let listing = try listAllNotes()
+    idx.total = listing.filter { !$0.locked }.count
     let live = Set(listing.map { $0.id })
     for id in idx.notes.keys where !live.contains(id) { idx.notes.removeValue(forKey: id) }
 
@@ -196,22 +230,65 @@ func updateIndex(_ idx: inout NotesIndex, budget: TimeInterval) throws -> (Int, 
             todo.append(n)
         }
     }
-    var i = 0
-    while i < todo.count && Date().timeIntervalSince(started) < budget {
-        let batch = Array(todo[i..<min(i + 50, todo.count)])
-        let out = try appleScript(asNotesTexts, batch.map { $0.id }, timeout: 180)
-        var texts: [String: String] = [:]
-        for r in records(out) where r.count >= 2 { texts[r[0]] = r[1...].joined(separator: US) }
-        for n in batch {
-            let text = String((texts[n.id] ?? "").prefix(20000))
-            idx.notes[n.id] = IndexedNote(title: n.title, folder: n.folder, modified: n.modified,
-                                          text: text, chunks: embedNote(title: n.title, text: text))
+    // Folders with many changed notes: read all their text in bulk. Others: note by note.
+    var byFolder: [String: [NoteListing]] = [:]
+    for n in todo { byFolder[n.folder, default: []].append(n) }
+    var done = 0
+    func store(_ n: NoteListing, _ raw: String?) {
+        let text = String((raw ?? "").replacingOccurrences(of: "\u{FFFC}", with: "").prefix(20000))
+        idx.notes[n.id] = IndexedNote(title: n.title, folder: n.folder, modified: n.modified,
+                                      text: text, chunks: embedNote(title: n.title, text: text))
+        done += 1
+    }
+    for (folder, notes) in byFolder.sorted(by: { $0.value.count > $1.value.count }) {
+        if Date().timeIntervalSince(started) > budget { break }
+        if notes.count > 15 {
+            let out = try appleScript(asFolderTexts, [folder], timeout: 600)
+            var texts: [String: String] = [:]
+            for r in records(out) where r.count >= 2 { texts[r[0]] = r[1...].joined(separator: US) }
+            for n in notes { store(n, texts[n.id]) }
+            saveIndex(idx)
+        } else {
+            var i = 0
+            while i < notes.count && Date().timeIntervalSince(started) < budget {
+                let batch = Array(notes[i..<min(i + 50, notes.count)])
+                let out = try appleScript(asNotesTexts, batch.map { $0.id }, timeout: 180)
+                var texts: [String: String] = [:]
+                for r in records(out) where r.count >= 2 { texts[r[0]] = r[1...].joined(separator: US) }
+                for n in batch { store(n, texts[n.id]) }
+                i += batch.count
+                saveIndex(idx)
+            }
         }
-        i += batch.count
-        saveIndex(idx)
     }
     let total = listing.filter { !$0.locked }.count
-    return (total - (todo.count - i), total, todo.count - i)
+    return (total - (todo.count - done), total, todo.count - done)
+}
+
+// MARK: - Background indexing
+
+let indexLock = NSLock()
+var indexRunning = false
+var indexProgress = (indexed: 0, total: 0)
+
+/// Starts one background indexing run (if none is running) that continues until finished.
+func startBackgroundIndexing() {
+    indexLock.lock()
+    if indexRunning { indexLock.unlock(); return }
+    indexRunning = true
+    indexLock.unlock()
+    Thread.detachNewThread {
+        var idx = loadIndex()
+        if let r = try? updateIndex(&idx, budget: 7200) {
+            indexLock.lock(); indexProgress = (r.0, r.1); indexLock.unlock()
+        }
+        indexLock.lock(); indexRunning = false; indexLock.unlock()
+    }
+}
+
+func backgroundRunning() -> Bool {
+    indexLock.lock(); defer { indexLock.unlock() }
+    return indexRunning
 }
 
 // MARK: - Tool
@@ -223,19 +300,26 @@ let notesSemanticTools: [Tool] = [
             "query": prop("string", "the question or topic"),
             "keywords": listProp("extra words/synonyms/translations to match in note text"),
             "limit": prop("integer", "default 10"),
-            "index_seconds": prop("integer", "time budget for indexing changed notes, default 50"),
+            "index_seconds": prop("integer", "time budget for updating changed notes before searching, default 30"),
          ], required: ["query"], kind: .read) { a in
         let query = try a.req("query")
         var idx = loadIndex()
-        let (indexed, total, remaining) = try updateIndex(&idx, budget: TimeInterval(a.int("index_seconds") ?? 50))
+        var total = 0, remaining = 0
+        if backgroundRunning() {
+            // A background run is still building the index: search what's saved so far.
+            total = idx.total ?? 0
+            remaining = max(0, total - idx.notes.count)
+            if total == 0 { remaining = -1 }
+        } else {
+            (_, total, remaining) = try updateIndex(&idx, budget: TimeInterval(a.int("index_seconds") ?? 30))
+            if remaining > 0 { startBackgroundIndexing() }
+        }
 
         // Query vectors per language present in the index.
         var qvec: [String: [Float]] = [:]
         let langs = Set(idx.notes.values.flatMap { $0.chunks.map { $0.lang } })
         for l in langs {
-            if let m = embeddingModel(l), m.0 == l, let v = m.1.vector(for: query) {
-                qvec[l] = normalizedVector(v)
-            }
+            if let e = embed(query, lang: l), e.0 == l { qvec[l] = e.1 }
         }
         let keywords = (a.list("keywords") + [query]).map { $0.lowercased() }
 
@@ -245,12 +329,13 @@ let notesSemanticTools: [Tool] = [
             var bestChunk: NoteChunk? = nil
             for c in n.chunks {
                 guard let q = qvec[c.lang] else { continue }
-                let s = dot(q, fromData(c.vec))
+                // Very short passages get high similarity by accident; weight by length.
+            let s = dot(q, fromData(c.vec)) * min(1, Float(c.length) / 150)
                 if s > best { best = s; bestChunk = c }
             }
             let hay = (n.title + "\n" + n.text).lowercased()
             let hits = keywords.filter { !$0.isEmpty && hay.contains($0) }
-            let score = best + min(0.3, Float(hits.count) * 0.1)
+            let score = best + min(0.45, Float(hits.count) * 0.15)
             var snippet = bestChunk.map { substring(n.text, $0.start, min($0.length, 220)) } ?? String(n.text.prefix(220))
             if let kw = hits.first, let r = n.text.lowercased().range(of: kw) {
                 let pos = n.text.lowercased().distance(from: n.text.lowercased().startIndex, to: r.lowerBound)
@@ -266,9 +351,10 @@ let notesSemanticTools: [Tool] = [
             if !matched.isEmpty { d["keywords_matched"] = matched }
             return d
         }
-        var out: [String: Any] = ["results": results, "indexed": indexed, "total_notes": total]
-        if remaining > 0 {
-            out["note"] = "Index incomplete: \(remaining) notes still to index. Call again to continue; results so far cover \(indexed) notes."
+        var out: [String: Any] = ["results": results, "indexed": idx.notes.count]
+        if total > 0 { out["total_notes"] = total }
+        if remaining != 0 {
+            out["note"] = "Index still building in the background (\(idx.notes.count) notes indexed so far). Results cover only those; search again in a few minutes for complete results."
         }
         return out
     },

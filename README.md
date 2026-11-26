@@ -23,9 +23,18 @@ The result: one tool call and a few hundred tokens instead of a chain of screens
 - **Reminders:** read lists and reminders, create reminders with due dates and alerts, edit them, mark them done
 - **Contacts:** search by name, email or phone; create contacts (with a duplicate check); add emails and phone numbers
 - **Mail** (every account in Mail.app, e.g. iCloud and Exchange): list mailboxes, search, read messages, create drafts (new, reply, forward, with attachments), send a draft in two steps, mark read or flagged, move or archive, move to Trash, save attachments
-- **Notes:** list folders, search, read, create, append or replace, move, create folders, delete (into Recently Deleted)
+- **Notes:** list folders, search titles and text, **search by meaning** (see below), read, create, append or replace, move, create folders, delete (into Recently Deleted)
 - **Shortcuts:** list and run your Shortcuts
 - **Notifications:** a Mac banner; an iPhone/Watch alert through a "Claude alerts" reminder list; an iMessage to yourself
+
+## Semantic notes search
+
+`notes_semantic_search` finds notes by meaning, not just exact words ("notes about whether vegetables are healthy"):
+
+- On first use it reads all your notes (whole folders in bulk) and builds an on-device index using Apple's **NaturalLanguage** sentence embeddings. Indexing continues in the background; later searches only re-read changed notes.
+- Each query is compared by meaning against passages of every note, plus a bonus for keyword matches. Pass keywords in several languages (e.g. English, Swedish, Farsi) for best recall.
+- The index lives in `~/Library/Application Support/mac-apps-mcp/notes-index.plist` and never leaves your Mac. Locked notes are skipped.
+- Apple's on-device model is a rough semantic signal, strongest in English, so the keywords matter.
 
 ## Built-in safety
 
@@ -66,7 +75,7 @@ Add it to the Claude desktop app: Settings → Developer → **Edit Config**.
 
 Quit Claude (Cmd+Q) and reopen it. The first time each app is used, macOS asks once for permission: Calendars, Reminders and Contacts, plus Automation for Mail, Notes and Messages.
 
-## Tools (30)
+## Tools (31)
 
 | App | Tools |
 |---|---|
@@ -74,13 +83,13 @@ Quit Claude (Cmd+Q) and reopen it. The first time each app is used, macOS asks o
 | Reminders | `reminders_lists`, `reminders_get`, `reminders_create`, `reminders_update` |
 | Contacts | `contacts_search`, `contacts_create`, `contacts_update` |
 | Mail | `mail_mailboxes`, `mail_search`, `mail_read`, `mail_create_draft`, `mail_send_draft`, `mail_set_status`, `mail_move`, `mail_trash`, `mail_save_attachments` |
-| Notes | `notes_folders`, `notes_search`, `notes_read`, `notes_create`, `notes_update`, `notes_move`, `notes_create_folder`, `notes_delete` |
+| Notes | `notes_folders`, `notes_search`, `notes_semantic_search`, `notes_read`, `notes_create`, `notes_update`, `notes_move`, `notes_create_folder`, `notes_delete` |
 | Shortcuts | `shortcuts_list`, `shortcuts_run` |
 | Notify | `notify` |
 
 ## Limits
 
-- **Mail searches** default to each account's inbox and the last 7 days (max 90 days), so large mailboxes stay fast.
+- **Mail searches** default to each account's inbox and the last 7 days (max 90 days). They read the newest messages in chunks and stop after 90 seconds with a "partial" note, so large mailboxes never hang Mail. For long ranges, name one account.
 - **Forwarding** doesn't carry the original attachments; save them with `mail_save_attachments` and attach them again.
 - **Notes:** locked notes can't be read, and images inside notes aren't returned.
 - **Mac banners** don't reach the iPhone; use `phone: true`, which creates a synced reminder.

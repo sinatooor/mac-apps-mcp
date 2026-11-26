@@ -63,9 +63,11 @@ on run argv
     set mbName to item 2 of argv
     set nDays to (item 3 of argv) as integer
     set maxN to (item 4 of argv) as integer
+    set budget to (item 5 of argv) as integer
     set nowD to current date
     set cutoff to nowD - (nDays * days)
     set out to ""
+    set partial to false
     tell application "Mail"
         with timeout of 300 seconds
             repeat with acc in accounts
@@ -87,6 +89,10 @@ on run argv
                             set chunk to 50
                             set pos to 1
                             repeat while seen < maxN and pos <= total
+                                if ((current date) - nowD) > budget then
+                                    set partial to true
+                                    exit repeat
+                                end if
                                 if newestFirst then
                                     set a to pos
                                     set b to pos + chunk - 1
@@ -121,7 +127,7 @@ on run argv
             end repeat
         end timeout
     end tell
-    return out
+    return out & (character id 29) & (partial as text)
 end run
 """
 
@@ -384,7 +390,10 @@ let mailTools: [Tool] = [
             "limit": prop("integer", "default 25"),
          ], required: [], kind: .read) { a in
         let days = min(max(a.int("days") ?? 7, 1), 90)
-        let out = try appleScript(asSearch + asHelpers, [a.str("account") ?? "", a.str("mailbox") ?? "", String(days), "500"], timeout: 300)
+        let raw = try appleScript(asSearch + asHelpers, [a.str("account") ?? "", a.str("mailbox") ?? "", String(days), "500", "90"], timeout: 130)
+        let parts = raw.components(separatedBy: "\u{1D}")
+        let out = parts[0]
+        let partial = parts.count > 1 && parts[1] == "true"
         let fromQ = a.str("from")?.lowercased(), subjQ = a.str("subject")?.lowercased()
         var rows: [(Double, [String: Any])] = []
         for f in records(out) where f.count >= 8 {
@@ -403,7 +412,11 @@ let mailTools: [Tool] = [
         }
         rows.sort { $0.0 > $1.0 }
         let limit = a.int("limit") ?? 25
-        return ["count": rows.count, "messages": rows.prefix(limit).map { $0.1 }] as [String: Any]
+        var result: [String: Any] = ["count": rows.count, "messages": rows.prefix(limit).map { $0.1 }]
+        if partial {
+            result["note"] = "Partial: stopped after 90 s before reaching the start of the date range. Narrow with account and fewer days for complete results."
+        }
+        return result
     },
 
     Tool(app: "mail", name: "mail_read",
