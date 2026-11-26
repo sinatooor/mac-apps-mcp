@@ -213,7 +213,13 @@ let RS = "\u{1E}"
 /// never pasted into the script text, so they can't inject AppleScript code.
 func appleScript(_ source: String, _ args: [String] = [], timeout: TimeInterval = 120) throws -> String {
     do {
-        return try runProcess("/usr/bin/osascript", ["-e", source] + args, timeout: timeout)
+        do {
+            return try runProcess("/usr/bin/osascript", ["-e", source] + args, timeout: timeout)
+        } catch let e as ToolError where e.message.contains("-609") || e.message.contains("-903") {
+            // The app quit or restarted mid-request ("Connection is invalid"): wait and retry once.
+            Thread.sleep(forTimeInterval: 3)
+            return try runProcess("/usr/bin/osascript", ["-e", source] + args, timeout: timeout)
+        }
     } catch let e as ToolError {
         var m = e.message
         if m.contains("-1743") || m.lowercased().contains("not authorized") {

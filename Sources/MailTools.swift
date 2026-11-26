@@ -67,26 +67,59 @@ on run argv
     set cutoff to nowD - (nDays * days)
     set out to ""
     tell application "Mail"
-        repeat with acc in accounts
-            set accName to name of acc
-            if accFilter is "" or accName is accFilter then
-                if mbName is "" then
-                    set mbs to (mailboxes of acc whose name is "INBOX" or name is "Inkorg")
-                else
-                    set mbs to (mailboxes of acc whose name is mbName)
-                end if
-                repeat with mb in mbs
-                    set mbFull to name of mb
-                    set msgs to (messages of mb whose date received > cutoff)
-                    set n to 0
-                    repeat with m in msgs
-                        set n to n + 1
-                        if n > maxN then exit repeat
-                        set out to out & accName & US & mbFull & US & ((id of m) as text) & US & my txt(sender of m) & US & my txt(subject of m) & US & (((date received of m) - nowD) as text) & US & ((read status of m) as text) & US & ((flagged status of m) as text) & RS
+        with timeout of 300 seconds
+            repeat with acc in accounts
+                set accName to name of acc
+                if accFilter is "" or accName is accFilter then
+                    if mbName is "" then
+                        set mbs to (mailboxes of acc whose name is "INBOX" or name is "Inkorg")
+                    else
+                        set mbs to (mailboxes of acc whose name is mbName)
+                    end if
+                    repeat with mb in mbs
+                        set mbFull to name of mb
+                        set total to count of messages of mb
+                        if total > 0 then
+                            -- Read the newest messages in chunks instead of filtering the whole
+                            -- mailbox with "whose", which makes Mail scan every message.
+                            set newestFirst to ((date received of message 1 of mb) >= (date received of message total of mb))
+                            set seen to 0
+                            set chunk to 50
+                            set pos to 1
+                            repeat while seen < maxN and pos <= total
+                                if newestFirst then
+                                    set a to pos
+                                    set b to pos + chunk - 1
+                                    if b > total then set b to total
+                                else
+                                    set b to total - pos + 1
+                                    set a to b - chunk + 1
+                                    if a < 1 then set a to 1
+                                end if
+                                set rng to a reference to (messages a thru b of mb)
+                                set ds to date received of rng
+                                set ids to id of rng
+                                set sends to sender of rng
+                                set subs to subject of rng
+                                set rds to read status of rng
+                                set fls to flagged status of rng
+                                set anyNew to false
+                                repeat with i from 1 to count of ds
+                                    set d to item i of ds
+                                    if d > cutoff then
+                                        set anyNew to true
+                                        set seen to seen + 1
+                                        set out to out & accName & US & mbFull & US & ((item i of ids) as text) & US & my txt(item i of sends) & US & my txt(item i of subs) & US & ((d - nowD) as text) & US & ((item i of rds) as text) & US & ((item i of fls) as text) & RS
+                                    end if
+                                end repeat
+                                if not anyNew then exit repeat
+                                set pos to pos + chunk
+                            end repeat
+                        end if
                     end repeat
-                end repeat
-            end if
-        end repeat
+                end if
+            end repeat
+        end timeout
     end tell
     return out
 end run
@@ -351,7 +384,7 @@ let mailTools: [Tool] = [
             "limit": prop("integer", "default 25"),
          ], required: [], kind: .read) { a in
         let days = min(max(a.int("days") ?? 7, 1), 90)
-        let out = try appleScript(asSearch + asHelpers, [a.str("account") ?? "", a.str("mailbox") ?? "", String(days), "500"])
+        let out = try appleScript(asSearch + asHelpers, [a.str("account") ?? "", a.str("mailbox") ?? "", String(days), "500"], timeout: 300)
         let fromQ = a.str("from")?.lowercased(), subjQ = a.str("subject")?.lowercased()
         var rows: [(Double, [String: Any])] = []
         for f in records(out) where f.count >= 8 {
